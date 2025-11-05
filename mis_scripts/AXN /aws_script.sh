@@ -28,22 +28,28 @@ aws ec2 modify-subnet-attribute --subnet $SUB_ID --map-public-ip-on-launch
 SG_ID=$(aws ec2 create-security-group --vpc-id $VPC_ID \
     --group-name gsmio \
     --description "Mi grupo de seguridad para abrir el puerto 22 (SSH)" \
-    --vpc-id vpc-1a2b3c4d \
-    --output text)
+    --vpc-id $VPC_ID \
+    --query GroupId --output text)
 
 echo $SG_ID 
 
+# Dos versiones distintas para crear reglas de grupos de seguridad
+    # --protocol tcp \
+    # --port 22 \
+    # --cidr 0.0.0.0/0 > /dev/null/
+    --ip-permissions '[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges": [{"CidrIp":"0.0.0.0/0","Description":"Allow SSH"}]}]'
+
+# Añadimos reglas de entradas 
 aws ec2 authorize-security-group-ingress \
     --group-id $SG_ID \
-    --protocol tcp \
-    --port 22 \
-    --cidr 0.0.0.0/0
+    --ip-permissions '[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges": [{"CidrIp":"0.0.0.0/0","Description":"Allow SSH"}]}]'
+
 
 
 #Creamos una instancia EC2
 EC2_ID=$(aws ec2 run-instances \
     --image-id ami-0360c520857e3138f \
-    --instance-type t3.micro \
+    --instance-type t2.micro \
     --key-name vockey \
     --subnet-id $SUB_ID \
     --associate-public-ip-address \
