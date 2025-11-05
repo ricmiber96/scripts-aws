@@ -22,7 +22,7 @@ echo $SUB_ID
 
 #Habilito la asignacion de ipv4 publica en la subred
 #comprobar como NO se habilita y tenemos que hacerlo a posteriori
-aws ec2 modify-subnet-attribute --subnet $SUB_ID --map-public-ip-on-launch
+aws ec2 modify-subnet-attribute --subnet-id $SUB_ID --map-public-ip-on-launch
 
 #Creo el grupo de seguridad con el puerto 22 abierto (SSH)
 SG_ID=$(aws ec2 create-security-group --vpc-id $VPC_ID \
@@ -37,28 +37,34 @@ echo $SG_ID
     # Primera version: 
     # --protocol tcp \
     # --port 22 \
-    # --cidr 0.0.0.0/0 > /dev/null/
+    # --cidr 0.0.0.0/0 > /dev/null
 
     # Segunda version: 
     # --ip-permissions '[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges": [{"CidrIp":"0.0.0.0/0","Description":"Allow SSH"}]}]'
 
 # Añadimos reglas de entradas 
-aws ec2 authorize-security-group-ingress \
-    --group-id $SG_ID \
-    --ip-permissions '[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges": [{"CidrIp":"0.0.0.0/0","Description":"Allow SSH"}]}]'
+if aws ec2 authorize-security-group-ingress \
+  --group-id "$SG_ID" \
+  --ip-permissions '[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges":[{"CidrIp":"0.0.0.0/0","Description":"Allow SSH"}]}]'; 
+then
 
-
+# Comprobamos si se han agregado las reglas al grupo de seguridad 
+  echo "✅ Regla SSH agregada correctamente al grupo de seguridad $SG_ID"
+else
+  echo "❌ Error al agregar la regla SSH al grupo $SG_ID"
+fi
 
 #Creamos una instancia EC2
 EC2_ID=$(aws ec2 run-instances \
     --image-id ami-0360c520857e3138f \
     --instance-type t2.micro \
     --key-name vockey \
-    --subnet-id $SUB_ID \
-    --security-groups-ids $SG_ID \
+    --subnet-id "$SUB_ID" \
+    --security-group-ids "$SG_ID" \
     --associate-public-ip-address \
     --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=miec2}]' \
-    --query Instances.InstanceId --output text)
+    --query 'Instances[0].InstanceId' \
+    --output text)
 
 # Esperamos 5000ms para mostrar el ID de la instancia EC2
 sleep 15
