@@ -34,6 +34,9 @@ ejercicio2_crear_infraestructura() {
     echo "Creando Subred-Publica..."
     SUBNET_PUBLICA_ID=$(aws ec2 create-subnet --vpc-id $vpc_id --cidr-block 10.0.1.0/24 --availability-zone us-east-1a --query 'Subnet.SubnetId' --output text)
     aws ec2 create-tags --resources $SUBNET_PUBLICA_ID --tags Key=Name,Value=Subred-Publica
+    
+    # Habilitar asignación automática de IP pública
+    aws ec2 modify-subnet-attribute --subnet-id $SUBNET_PUBLICA_ID --map-public-ip-on-launch
     echo "Subred-Publica creada: $SUBNET_PUBLICA_ID"
     
     # Crear Subred-App
@@ -101,10 +104,41 @@ ejercicio3_crear_instancias() {
     echo "✅ Instancias y grupos de seguridad creados exitosamente!"
 }
 
-ejercicio4_configurar_nacl() {
+ejercicio4_crear_nat_gateway() {
+    local vpc_id=$1
+    local subnet_publica_id=$2
+    local subnet_app_id=$3
+    echo "=== EJERCICIO 4: Implementación de NAT Gateway para Salida Privada ==="
+    
+    # Crear IP Elástica
+    echo "Creando IP Elástica..."
+    ELASTIC_IP_ALLOC=$(aws ec2 allocate-address --domain vpc --tag-specifications 'ResourceType=elastic-ip,Tags=[{Key=Name,Value=Examen-NAT-EIP}]' --query 'AllocationId' --output text)
+    echo "IP Elástica creada: $ELASTIC_IP_ALLOC"
+    
+    # Crear NAT Gateway
+    echo "Creando NAT Gateway..."
+    NAT_GW_ID=$(aws ec2 create-nat-gateway --subnet-id $subnet_publica_id --allocation-id $ELASTIC_IP_ALLOC --tag-specifications 'ResourceType=nat-gateway,Tags=[{Key=Name,Value=Examen-NAT-GW}]' --query 'NatGateway.NatGatewayId' --output text)
+    echo "NAT Gateway creado: $NAT_GW_ID"
+    
+    # Esperar a que el NAT Gateway esté disponible
+    echo "Esperando a que el NAT Gateway esté disponible..."
+    aws ec2 wait nat-gateway-available --nat-gateway-ids $NAT_GW_ID
+    
+    # Obtener la tabla de rutas privada
+    RT_PRIVADA_ID=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$vpc_id" "Name=association.subnet-id,Values=$subnet_app_id" --query 'RouteTables[0].RouteTableId' --output text)
+    
+    # Agregar ruta hacia el NAT Gateway
+    echo "Configurando ruta hacia NAT Gateway..."
+    aws ec2 create-route --route-table-id $RT_PRIVADA_ID --destination-cidr-block 0.0.0.0/0 --nat-gateway-id $NAT_GW_ID
+    
+    echo "✅ NAT Gateway configurado exitosamente!"
+    echo "El App-Server ahora tiene salida a internet a través del NAT Gateway"
+}
+
+ejercicio5_configurar_nacl() {
     local vpc_id=$1
     local subnet_app_id=$2
-    echo "=== EJERCICIO 4: Configurando Network ACL ==="
+    echo "=== EJERCICIO 5: Configurando Network ACL ==="
     
     # Crear Network ACL
     echo "Creando Network ACL..."
@@ -142,7 +176,8 @@ main() {
     ejercicio1_crear_vpc
     ejercicio2_crear_infraestructura $VPC_ID
     ejercicio3_crear_instancias $VPC_ID $SUBNET_PUBLICA_ID $SUBNET_APP_ID
-    ejercicio4_configurar_nacl $VPC_ID $SUBNET_APP_ID
+    ejercicio4_crear_nat_gateway $VPC_ID $SUBNET_PUBLICA_ID $SUBNET_APP_ID
+    ejercicio5_configurar_nacl $VPC_ID $SUBNET_APP_ID
     
     # Resumen final
     echo
@@ -156,9 +191,11 @@ main() {
     echo "Security Group App ID: $SG_APP_ID"
     echo "Bastion-Host ID: $BASTION_ID"
     echo "App-Server ID: $APP_SERVER_ID"
+    echo "NAT Gateway ID: $NAT_GW_ID"
+    echo "IP Elástica NAT: $ELASTIC_IP_ALLOC"
     echo "Network ACL ID: $NACL_ID"
     echo
-    echo "Nota: Subred-App usa la tabla de enrutamiento por defecto (sin acceso directo a internet)"
+    echo "Nota: App-Server tiene salida a internet a través del NAT Gateway"
     echo "Nota: NACL-Prueba está asociada a Subred-App con reglas stateless para SSH e ICMP"
 }
 

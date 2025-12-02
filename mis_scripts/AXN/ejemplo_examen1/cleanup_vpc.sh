@@ -96,7 +96,34 @@ for SG_ID in $SECURITY_GROUPS; do
     echo "Security Group $SG_ID eliminado"
 done
 
-# 4. Eliminar tablas de enrutamiento personalizadas
+# 4. Eliminar NAT Gateways e IPs Elásticas
+echo -e "\nEliminando NAT Gateways..."
+NAT_GW_IDS=$(aws ec2 describe-nat-gateways --region $REGION \
+    --filter "Name=vpc-id,Values=$VPC_ID" "Name=state,Values=available" \
+    --query 'NatGateways[].NatGatewayId' --output text)
+
+for NAT_GW_ID in $NAT_GW_IDS; do
+    # Obtener Allocation ID de la IP elástica
+    ALLOCATION_ID=$(aws ec2 describe-nat-gateways --region $REGION \
+        --nat-gateway-ids $NAT_GW_ID \
+        --query 'NatGateways[0].NatGatewayAddresses[0].AllocationId' --output text)
+    
+    # Eliminar NAT Gateway
+    aws ec2 delete-nat-gateway --region $REGION --nat-gateway-id $NAT_GW_ID || true
+    echo "NAT Gateway $NAT_GW_ID eliminado"
+    
+    # Esperar a que se elimine
+    echo "Esperando eliminación del NAT Gateway..."
+    aws ec2 wait nat-gateway-deleted --region $REGION --nat-gateway-ids $NAT_GW_ID || true
+    
+    # Liberar IP elástica
+    if [ "$ALLOCATION_ID" != "None" ] && [ -n "$ALLOCATION_ID" ]; then
+        aws ec2 release-address --region $REGION --allocation-id $ALLOCATION_ID || true
+        echo "IP Elástica $ALLOCATION_ID liberada"
+    fi
+done
+
+# 5. Eliminar tablas de enrutamiento personalizadas
 echo -e "\nEliminando tablas de enrutamiento..."
 ROUTE_TABLES=$(aws ec2 describe-route-tables --region $REGION \
     --filters "Name=vpc-id,Values=$VPC_ID" \
@@ -117,7 +144,7 @@ for RT_ID in $ROUTE_TABLES; do
     echo "Tabla de enrutamiento $RT_ID eliminada"
 done
 
-# 5. Desconectar y eliminar Internet Gateway
+# 6. Desconectar y eliminar Internet Gateway
 echo -e "\nEliminando Internet Gateway..."
 IGW_IDS=$(aws ec2 describe-internet-gateways --region $REGION \
     --filters "Name=attachment.vpc-id,Values=$VPC_ID" \
@@ -130,7 +157,7 @@ for IGW_ID in $IGW_IDS; do
     echo "Internet Gateway $IGW_ID eliminado"
 done
 
-# 6. Eliminar subredes
+# 7. Eliminar subredes
 echo -e "\nEliminando subredes..."
 SUBNET_IDS=$(aws ec2 describe-subnets --region $REGION \
     --filters "Name=vpc-id,Values=$VPC_ID" \
@@ -141,7 +168,7 @@ for SUBNET_ID in $SUBNET_IDS; do
     echo "Subred $SUBNET_ID eliminada"
 done
 
-# 7. Eliminar VPC
+# 8. Eliminar VPC
 echo -e "\nEliminando VPC..."
 aws ec2 delete-vpc --region $REGION --vpc-id $VPC_ID
 echo "✅ VPC $VPC_ID y toda su infraestructura eliminada exitosamente!"
