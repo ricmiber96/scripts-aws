@@ -5,18 +5,18 @@ def main():
     ec2 = boto3.client('ec2', region_name='us-east-1')
     
     # Buscar VPC por nombre
-    print("Buscando VPC 'Examen-VPC-SuNombre'...")
+    print("Buscando VPC 'Examen-VPC-Ricardo'...")
     vpcs = ec2.describe_vpcs(
         Filters=[
             {
                 'Name': 'tag:Name',
-                'Values': ['Examen-VPC-SuNombre']
+                'Values': ['Examen-VPC-Ricardo']
             }
         ]
     )
     
     if not vpcs['Vpcs']:
-        print("❌ No se encontró la VPC 'Examen-VPC-SuNombre'")
+        print("❌ No se encontró la VPC 'Examen-VPC-Ricardo'")
         return
     
     vpc_id = vpcs['Vpcs'][0]['VpcId']
@@ -107,7 +107,40 @@ def main():
             except Exception as e:
                 print(f"Error eliminando Security Group: {e}")
     
-    # 4. Eliminar tablas de enrutamiento personalizadas
+    # 4. Eliminar NAT Gateways e IPs Elásticas
+    print("\nEliminando NAT Gateways...")
+    nat_gateways = ec2.describe_nat_gateways(
+        Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}]
+    )
+    
+    for nat_gw in nat_gateways['NatGateways']:
+        if nat_gw['State'] not in ['deleted', 'deleting']:
+            try:
+                # Obtener AllocationId de la IP Elástica antes de eliminar NAT Gateway
+                allocation_id = None
+                for address in nat_gw['NatGatewayAddresses']:
+                    if 'AllocationId' in address:
+                        allocation_id = address['AllocationId']
+                        break
+                
+                # Eliminar NAT Gateway
+                ec2.delete_nat_gateway(NatGatewayId=nat_gw['NatGatewayId'])
+                print(f"NAT Gateway {nat_gw['NatGatewayId']} eliminado")
+                
+                # Esperar a que el NAT Gateway se elimine
+                print("Esperando eliminación del NAT Gateway...")
+                waiter = ec2.get_waiter('nat_gateway_deleted')
+                waiter.wait(NatGatewayIds=[nat_gw['NatGatewayId']])
+                
+                # Liberar IP Elástica
+                if allocation_id:
+                    ec2.release_address(AllocationId=allocation_id)
+                    print(f"IP Elástica {allocation_id} liberada")
+                    
+            except Exception as e:
+                print(f"Error eliminando NAT Gateway: {e}")
+    
+    # 5. Eliminar tablas de enrutamiento personalizadas
     print("\nEliminando tablas de enrutamiento...")
     route_tables = ec2.describe_route_tables(
         Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}]
@@ -125,7 +158,7 @@ def main():
             except Exception as e:
                 print(f"Error eliminando tabla de enrutamiento: {e}")
     
-    # 5. Desconectar y eliminar Internet Gateway
+    # 6. Desconectar y eliminar Internet Gateway
     print("\nEliminando Internet Gateway...")
     igws = ec2.describe_internet_gateways(
         Filters=[{'Name': 'attachment.vpc-id', 'Values': [vpc_id]}]
@@ -141,7 +174,7 @@ def main():
         except Exception as e:
             print(f"Error eliminando IGW: {e}")
     
-    # 6. Eliminar subredes
+    # 7. Eliminar subredes
     print("\nEliminando subredes...")
     subnets = ec2.describe_subnets(
         Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}]
@@ -153,7 +186,7 @@ def main():
         except Exception as e:
             print(f"Error eliminando subred: {e}")
     
-    # 7. Eliminar VPC
+    # 8. Eliminar VPC
     print("\nEliminando VPC...")
     try:
         ec2.delete_vpc(VpcId=vpc_id)

@@ -99,8 +99,8 @@ done
 # 4. Eliminar NAT Gateways e IPs Elásticas
 echo -e "\nEliminando NAT Gateways..."
 NAT_GW_IDS=$(aws ec2 describe-nat-gateways --region $REGION \
-    --filter "Name=vpc-id,Values=$VPC_ID" "Name=state,Values=available" \
-    --query 'NatGateways[].NatGatewayId' --output text)
+    --filter "Name=vpc-id,Values=$VPC_ID" \
+    --query 'NatGateways[?State!=`deleted` && State!=`deleting`].NatGatewayId' --output text)
 
 for NAT_GW_ID in $NAT_GW_IDS; do
     # Obtener Allocation ID de la IP elástica

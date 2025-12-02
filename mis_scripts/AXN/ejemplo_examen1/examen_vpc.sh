@@ -20,7 +20,7 @@ ejercicio1_crear_vpc() {
     
     # Etiquetar VPC
     echo "Etiquetando VPC..."
-    aws ec2 create-tags --resources $VPC_ID --tags Key=Name,Value=Examen-VPC-SuNombre
+    aws ec2 create-tags --resources $VPC_ID --tags Key=Name,Value=Examen-VPC-Ricardo
     
     echo "✅ VPC creada exitosamente: $VPC_ID"
     echo
@@ -93,12 +93,12 @@ ejercicio3_crear_instancias() {
     
     # Lanzar instancia Bastion-Host
     echo "Lanzando instancia Bastion-Host..."
-    BASTION_ID=$(aws ec2 run-instances --image-id $AMI_ID --count 1 --instance-type t2.micro --subnet-id $subnet_publica_id --security-group-ids $SG_BASTION_ID --associate-public-ip-address --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=Bastion-Host}]' --query 'Instances[0].InstanceId' --output text)
+    BASTION_ID=$(aws ec2 run-instances --image-id $AMI_ID --count 1 --instance-type t2.micro --key-name vockey --subnet-id $subnet_publica_id --security-group-ids $SG_BASTION_ID --associate-public-ip-address --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=Bastion-Host}]' --query 'Instances[0].InstanceId' --output text)
     echo "Bastion-Host lanzado: $BASTION_ID"
     
     # Lanzar instancia App-Server
     echo "Lanzando instancia App-Server..."
-    APP_SERVER_ID=$(aws ec2 run-instances --image-id $AMI_ID --count 1 --instance-type t2.micro --subnet-id $subnet_app_id --security-group-ids $SG_APP_ID --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=App-Server}]' --query 'Instances[0].InstanceId' --output text)
+    APP_SERVER_ID=$(aws ec2 run-instances --image-id $AMI_ID --count 1 --instance-type t2.micro --key-name vockey --subnet-id $subnet_app_id --security-group-ids $SG_APP_ID --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=App-Server}]' --query 'Instances[0].InstanceId' --output text)
     echo "App-Server lanzado: $APP_SERVER_ID"
     
     echo "✅ Instancias y grupos de seguridad creados exitosamente!"
@@ -117,7 +117,10 @@ ejercicio4_crear_nat_gateway() {
     
     # Crear NAT Gateway
     echo "Creando NAT Gateway..."
-    NAT_GW_ID=$(aws ec2 create-nat-gateway --subnet-id $subnet_publica_id --allocation-id $ELASTIC_IP_ALLOC --tag-specifications 'ResourceType=nat-gateway,Tags=[{Key=Name,Value=Examen-NAT-GW}]' --query 'NatGateway.NatGatewayId' --output text)
+    NAT_GW_ID=$(aws ec2 create-nat-gateway --subnet-id $subnet_publica_id --allocation-id $ELASTIC_IP_ALLOC --query 'NatGateway.NatGatewayId' --output text)
+    
+    # Etiquetar NAT Gateway
+    aws ec2 create-tags --resources $NAT_GW_ID --tags Key=Name,Value=Examen-NAT-GW
     echo "NAT Gateway creado: $NAT_GW_ID"
     
     # Esperar a que el NAT Gateway esté disponible
@@ -133,6 +136,44 @@ ejercicio4_crear_nat_gateway() {
     
     echo "✅ NAT Gateway configurado exitosamente!"
     echo "El App-Server ahora tiene salida a internet a través del NAT Gateway"
+}
+
+ejercicio5_configurar_nacl_fallo_ping() {
+    local vpc_id=$1
+    local subnet_app_id=$2
+    echo "=== EJERCICIO 5: Configurando Network ACL (FALLO PING) ==="
+    
+    # Crear Network ACL
+    echo "Creando Network ACL..."
+    NACL_ID=$(aws ec2 create-network-acl --vpc-id $vpc_id --query 'NetworkAcl.NetworkAclId' --output text)
+    aws ec2 create-tags --resources $NACL_ID --tags Key=Name,Value=NACL-Fallo-Ping
+    echo "Network ACL creada: $NACL_ID"
+    
+    # Asociar NACL a Subred-App
+    echo "Asociando NACL a Subred-App..."
+    CURRENT_ASSOCIATION_ID=$(aws ec2 describe-network-acls --filters "Name=association.subnet-id,Values=$subnet_app_id" --query 'NetworkAcls[0].Associations[0].NetworkAclAssociationId' --output text)
+    aws ec2 replace-network-acl-association --association-id $CURRENT_ASSOCIATION_ID --network-acl-id $NACL_ID
+    echo "NACL asociada a Subred-App"
+    
+    # Reglas de entrada (Inbound) - PERMITIR TODO
+    echo "Configurando reglas de entrada..."
+    # SSH (puerto 22)
+    aws ec2 create-network-acl-entry --network-acl-id $NACL_ID --rule-number 100 --protocol tcp --port-range From=22,To=22 --cidr-block 0.0.0.0/0 --rule-action allow
+    
+    # ICMP de entrada - PERMITIR (para recibir ping)
+    aws ec2 create-network-acl-entry --network-acl-id $NACL_ID --rule-number 110 --protocol icmp --icmp-type-code Type=-1,Code=-1 --cidr-block 0.0.0.0/0 --rule-action allow
+    
+    # Reglas de salida (Outbound) - BLOQUEAR ICMP
+    echo "Configurando reglas de salida (SIN ICMP)..."
+    # Puertos efímeros para respuestas SSH (1024-65535) - PERMITIR
+    aws ec2 create-network-acl-entry --network-acl-id $NACL_ID --rule-number 100 --protocol tcp --port-range From=1024,To=65535 --cidr-block 0.0.0.0/0 --rule-action allow --egress
+    
+    # *** NO AÑADIR REGLA ICMP DE SALIDA - ESTO CAUSA EL FALLO ***
+    # Las respuestas ICMP serán bloqueadas, demostrando el comportamiento stateless
+    
+    echo "⚠️  Network ACL configurada SIN reglas ICMP de salida"
+    echo "⚠️  El ping FALLARÁ porque las respuestas ICMP están bloqueadas"
+    echo "⚠️  Esto demuestra el comportamiento STATELESS de las NACLs"
 }
 
 ejercicio5_configurar_nacl() {
@@ -177,7 +218,10 @@ main() {
     ejercicio2_crear_infraestructura $VPC_ID
     ejercicio3_crear_instancias $VPC_ID $SUBNET_PUBLICA_ID $SUBNET_APP_ID
     ejercicio4_crear_nat_gateway $VPC_ID $SUBNET_PUBLICA_ID $SUBNET_APP_ID
+    
+    # Usar la función normal o la de fallo según se necesite
     ejercicio5_configurar_nacl $VPC_ID $SUBNET_APP_ID
+    # ejercicio5_configurar_nacl_fallo_ping $VPC_ID $SUBNET_APP_ID  # Para demostrar fallo
     
     # Resumen final
     echo
@@ -197,6 +241,10 @@ main() {
     echo
     echo "Nota: App-Server tiene salida a internet a través del NAT Gateway"
     echo "Nota: NACL-Prueba está asociada a Subred-App con reglas stateless para SSH e ICMP"
+    echo
+    echo "Para demostrar el comportamiento STATELESS de las NACLs:"
+    echo "- Cambia 'ejercicio5_configurar_nacl' por 'ejercicio5_configurar_nacl_fallo_ping' en main()"
+    echo "- El ping fallará porque las respuestas ICMP estarán bloqueadas"
 }
 
 # Ejecutar script principal
