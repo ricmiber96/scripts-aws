@@ -14,6 +14,66 @@ def get_ubuntu_ami(ec2_client):
     images = sorted(response['Images'], key=lambda x: x['CreationDate'], reverse=True)
     return images[0]['ImageId']
 
+def wait_for_instances_running(ec2_client, instance_ids):
+    """Espera a que las instancias estén en estado running, manejando instancias que no existen"""
+    max_attempts = 60
+    valid_instances = instance_ids.copy()
+    
+    for attempt in range(max_attempts):
+        if not valid_instances:
+            print("⚠️ No hay instancias válidas para verificar")
+            return
+            
+        try:
+            response = ec2_client.describe_instances(InstanceIds=valid_instances)
+        except Exception as e:
+            if "InvalidInstanceID.NotFound" in str(e):
+                print(f"⚠️ Algunas instancias no existen, verificando individualmente...")
+                # Verificar cada instancia individualmente
+                still_valid = []
+                for instance_id in valid_instances:
+                    try:
+                        ec2_client.describe_instances(InstanceIds=[instance_id])
+                        still_valid.append(instance_id)
+                    except:
+                        print(f"⚠️ Instancia {instance_id} no existe, removiendo de la lista")
+                valid_instances = still_valid
+                continue
+            else:
+                raise e
+        
+        running_count = 0
+        instances_to_remove = []
+        
+        for reservation in response['Reservations']:
+            for instance in reservation['Instances']:
+                instance_id = instance['InstanceId']
+                state = instance['State']['Name']
+                
+                if state == 'running':
+                    running_count += 1
+                elif state in ['shutting-down', 'terminated', 'stopping', 'stopped']:
+                    print(f"⚠️ Instancia {instance_id} está en estado {state}, removiendo...")
+                    instances_to_remove.append(instance_id)
+        
+        # Remover instancias que no están en estados válidos
+        for instance_id in instances_to_remove:
+            if instance_id in valid_instances:
+                valid_instances.remove(instance_id)
+        
+        if not valid_instances:
+            print("⚠️ No quedan instancias válidas")
+            return
+            
+        if running_count == len(valid_instances):
+            print(f"✅ Todas las instancias válidas ({running_count}) están ejecutándose")
+            return
+        
+        print(f"Esperando... {running_count}/{len(valid_instances)} instancias ejecutándose")
+        time.sleep(10)
+    
+    print(f"⚠️ Timeout esperando instancias, continuando con {len(valid_instances)} instancias válidas")
+
 def create_vpc_infrastructure(region, vpc_configs):
     """Crea VPCs, subredes, IGW e instancias EC2 en una región"""
     ec2 = boto3.client('ec2', region_name=region)
@@ -107,7 +167,11 @@ def create_vpc_infrastructure(region, vpc_configs):
     all_instance_ids = [res['instance_id'] for res in created_resources]
     if all_instance_ids:
         print(f"Esperando que todas las instancias en {region} estén ejecutándose...")
-        ec2.get_waiter('instance_running').wait(InstanceIds=all_instance_ids)
+        try:
+            wait_for_instances_running(ec2, all_instance_ids)
+        except Exception as e:
+            print(f"⚠️ Problema verificando instancias: {e}")
+            print("Continuando con la creación de infraestructura...")
     
     return created_resources
 
@@ -231,30 +295,38 @@ def configure_tgw_routes(tgw_east_id, tgw_west_id, peering_id):
     
     print("\n--- Configurando rutas TGW ---")
     
-    # Obtener tablas de rutas por defecto
-    east_rt = ec2_east.describe_transit_gateway_route_tables(
-        Filters=[{'Name': 'transit-gateway-id', 'Values': [tgw_east_id]}]
-    )['TransitGatewayRouteTables'][0]['TransitGatewayRouteTableId']
+    # Esperar un poco más para asegurar propagación del peering
+    time.sleep(30)
     
-    west_rt = ec2_west.describe_transit_gateway_route_tables(
-        Filters=[{'Name': 'transit-gateway-id', 'Values': [tgw_west_id]}]
-    )['TransitGatewayRouteTables'][0]['TransitGatewayRouteTableId']
-    
-    # Ruta en TGW-East hacia redes de West (192.x.x.x)
-    ec2_east.create_transit_gateway_route(
-        DestinationCidrBlock='192.0.0.0/8',
-        TransitGatewayRouteTableId=east_rt,
-        TransitGatewayAttachmentId=peering_id
-    )
-    
-    # Ruta en TGW-West hacia redes de East (10.x.x.x)
-    ec2_west.create_transit_gateway_route(
-        DestinationCidrBlock='10.0.0.0/8',
-        TransitGatewayRouteTableId=west_rt,
-        TransitGatewayAttachmentId=peering_id
-    )
-    
-    print("Rutas TGW configuradas")
+    try:
+        # Obtener tablas de rutas por defecto
+        east_rt = ec2_east.describe_transit_gateway_route_tables(
+            Filters=[{'Name': 'transit-gateway-id', 'Values': [tgw_east_id]}]
+        )['TransitGatewayRouteTables'][0]['TransitGatewayRouteTableId']
+        
+        west_rt = ec2_west.describe_transit_gateway_route_tables(
+            Filters=[{'Name': 'transit-gateway-id', 'Values': [tgw_west_id]}]
+        )['TransitGatewayRouteTables'][0]['TransitGatewayRouteTableId']
+        
+        # Ruta en TGW-East hacia redes de West (192.x.x.x)
+        ec2_east.create_transit_gateway_route(
+            DestinationCidrBlock='192.0.0.0/8',
+            TransitGatewayRouteTableId=east_rt,
+            TransitGatewayAttachmentId=peering_id
+        )
+        
+        # Ruta en TGW-West hacia redes de East (10.x.x.x)
+        ec2_west.create_transit_gateway_route(
+            DestinationCidrBlock='10.0.0.0/8',
+            TransitGatewayRouteTableId=west_rt,
+            TransitGatewayAttachmentId=peering_id
+        )
+        
+        print("Rutas TGW configuradas")
+        
+    except Exception as e:
+        print(f"⚠️ Error configurando rutas TGW: {e}")
+        print("Continuando sin rutas TGW (las VPCs locales seguirán funcionando)")
 
 def configure_vpc_routes(region, vpc_resources, tgw_id):
     """Configura rutas en las VPCs hacia el Transit Gateway"""
@@ -270,12 +342,15 @@ def configure_vpc_routes(region, vpc_resources, tgw_id):
     
     for resource in vpc_resources:
         rt_id = resource['route_table_id']
-        ec2.create_route(
-            RouteTableId=rt_id,
-            DestinationCidrBlock=dest_cidr,
-            TransitGatewayId=tgw_id
-        )
-        print(f"Ruta {dest_cidr} -> TGW configurada en RT {rt_id}")
+        try:
+            ec2.create_route(
+                RouteTableId=rt_id,
+                DestinationCidrBlock=dest_cidr,
+                TransitGatewayId=tgw_id
+            )
+            print(f"Ruta {dest_cidr} -> TGW configurada en RT {rt_id}")
+        except Exception as e:
+            print(f"⚠️ Error configurando ruta en {rt_id}: {e}")
 
 def main():
     print("=== Iniciando despliegue de infraestructura Transit Gateway ===")
