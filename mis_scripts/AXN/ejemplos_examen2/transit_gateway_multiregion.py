@@ -138,11 +138,12 @@ def create_vpc_infrastructure(region, vpc_configs):
         )
         
         # Crear instancia EC2
+        print(f"Creando instancia en {vpc_name}...")
         instance_response = ec2.run_instances(
             ImageId=ubuntu_ami,
             MinCount=1,
             MaxCount=1,
-            InstanceType='t2.micro',
+            InstanceType='t3.micro',
             SubnetId=subnet_id,
             SecurityGroupIds=[sg_id],
             TagSpecifications=[{
@@ -151,6 +152,21 @@ def create_vpc_infrastructure(region, vpc_configs):
             }]
         )
         instance_id = instance_response['Instances'][0]['InstanceId']
+        
+        # Verificar inmediatamente el estado de la instancia
+        time.sleep(5)
+        try:
+            check_response = ec2.describe_instances(InstanceIds=[instance_id])
+            current_state = check_response['Reservations'][0]['Instances'][0]['State']['Name']
+            print(f"Estado inicial de {instance_id}: {current_state}")
+            
+            if current_state in ['shutting-down', 'terminated']:
+                print(f"⚠️ Instancia {instance_id} falló al iniciar, verificando razón...")
+                # Intentar obtener información de estado
+                state_reason = check_response['Reservations'][0]['Instances'][0].get('StateReason', {})
+                print(f"Razón del estado: {state_reason.get('Message', 'No disponible')}")
+        except Exception as e:
+            print(f"⚠️ Error verificando estado de instancia: {e}")
         
         print(f"VPC: {vpc_id}, Subnet: {subnet_id}, Instance: {instance_id}")
         
@@ -162,16 +178,33 @@ def create_vpc_infrastructure(region, vpc_configs):
             'sg_id': sg_id,
             'route_table_id': main_rt_id
         })
+        
+        # Pausa entre creaciones para evitar problemas de límites
+        time.sleep(10)
     
     # Esperar a que todas las instancias estén ejecutándose
     all_instance_ids = [res['instance_id'] for res in created_resources]
     if all_instance_ids:
-        print(f"Esperando que todas las instancias en {region} estén ejecutándose...")
+        print(f"\nEsperando que todas las instancias en {region} estén ejecutándose...")
+        print(f"Instancias a verificar: {all_instance_ids}")
         try:
             wait_for_instances_running(ec2, all_instance_ids)
         except Exception as e:
             print(f"⚠️ Problema verificando instancias: {e}")
             print("Continuando con la creación de infraestructura...")
+            # Filtrar instancias que realmente existen
+            valid_resources = []
+            for res in created_resources:
+                try:
+                    check = ec2.describe_instances(InstanceIds=[res['instance_id']])
+                    state = check['Reservations'][0]['Instances'][0]['State']['Name']
+                    if state not in ['shutting-down', 'terminated']:
+                        valid_resources.append(res)
+                    else:
+                        print(f"⚠️ Removiendo recurso con instancia fallida: {res['instance_id']}")
+                except:
+                    print(f"⚠️ Removiendo recurso con instancia inexistente: {res['instance_id']}")
+            created_resources[:] = valid_resources
     
     return created_resources
 
