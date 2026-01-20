@@ -3,44 +3,22 @@ import boto3
 import time
 
 def cleanup_transit_gateway_infrastructure():
-    """Elimina toda la infraestructura Transit Gateway multi-región"""
+    """Elimina las conexiones intra-regionales Transit Gateway (VPC attachments) y VPCs asociadas.
+    Mantiene los Transit Gateways y el peering inter-regional."""
     ec2_east = boto3.client('ec2', region_name='us-east-1')
     ec2_west = boto3.client('ec2', region_name='us-west-2')
     
-    print("=== Limpiando infraestructura Transit Gateway ===")
+    print("=== Limpiando conexiones intra-regionales Transit Gateway ===")
     
     try:
-        # 1. Eliminar TGW Peering
-        print("\n--- Eliminando TGW Peering ---")
-        try:
-            peerings = ec2_east.describe_transit_gateway_peering_attachments()
-            for peering in peerings['TransitGatewayPeeringAttachments']:
-                if peering['State'] in ['available', 'pending']:
-                    peering_id = peering['TransitGatewayAttachmentId']
-                    print(f"Eliminando peering: {peering_id}")
-                    ec2_east.delete_transit_gateway_peering_attachment(TransitGatewayAttachmentId=peering_id)
-                    
-                    # Esperar eliminación del peering
-                    print("Esperando eliminación del peering...")
-                    while True:
-                        try:
-                            response = ec2_east.describe_transit_gateway_peering_attachments(TransitGatewayAttachmentIds=[peering_id])
-                            state = response['TransitGatewayPeeringAttachments'][0]['State']
-                            if state == 'deleted':
-                                break
-                        except:
-                            break  # Attachment no existe, eliminado
-                        time.sleep(10)
-        except Exception as e:
-            print(f"Error eliminando peering: {e}")
+        # Nota: Este script ahora solo elimina conexiones intra-regionales (VPC attachments)
+        # Las conexiones inter-regionales (TGW peering) se mantienen
         
-        # 2. Eliminar TGW Attachments y VPCs por región
+        # 1. Eliminar TGW Attachments y VPCs por región (conexiones intra-regionales)
         regions = [
             ('us-east-1', ec2_east, ['VPC-East-1', 'VPC-East-2']),
             ('us-west-2', ec2_west, ['VPC-West-1', 'VPC-West-2'])
         ]
-        
-        tgw_ids = []
         
         for region, ec2_client, vpc_names in regions:
             print(f"\n--- Limpiando recursos en {region} ---")
@@ -51,21 +29,21 @@ def cleanup_transit_gateway_infrastructure():
                 for tgw in tgws['TransitGateways']:
                     if tgw['State'] in ['available', 'pending']:
                         tgw_id = tgw['TransitGatewayId']
-                        tgw_ids.append((region, ec2_client, tgw_id))
                         
                         # Eliminar VPC attachments
                         attachments = ec2_client.describe_transit_gateway_vpc_attachments(
                             Filters=[{'Name': 'transit-gateway-id', 'Values': [tgw_id]}]
                         )
                         
+                        attachment_ids = []
                         for attachment in attachments['TransitGatewayVpcAttachments']:
                             if attachment['State'] in ['available', 'pending']:
                                 attachment_id = attachment['TransitGatewayAttachmentId']
+                                attachment_ids.append(attachment_id)
                                 print(f"Eliminando attachment: {attachment_id}")
                                 ec2_client.delete_transit_gateway_vpc_attachment(TransitGatewayAttachmentId=attachment_id)
                         
                         # Esperar eliminación de attachments
-                        attachment_ids = [att['TransitGatewayAttachmentId'] for att in attachments['TransitGatewayVpcAttachments'] if att['State'] in ['available', 'pending']]
                         if attachment_ids:
                             print("Esperando eliminación de attachments...")
                             for att_id in attachment_ids:
@@ -73,11 +51,11 @@ def cleanup_transit_gateway_infrastructure():
                                     try:
                                         response = ec2_client.describe_transit_gateway_vpc_attachments(TransitGatewayAttachmentIds=[att_id])
                                         state = response['TransitGatewayVpcAttachments'][0]['State']
-                                        if state == 'deleted':
+                                        if state in ['deleted', 'deleting']:
                                             break
                                     except:
                                         break  # Attachment no existe
-                                    time.sleep(10)
+                                    time.sleep(15)
             except Exception as e:
                 print(f"Error eliminando attachments en {region}: {e}")
             
@@ -95,7 +73,7 @@ def cleanup_transit_gateway_infrastructure():
                         instance_ids = []
                         for reservation in instances['Reservations']:
                             for instance in reservation['Instances']:
-                                if instance['State']['Name'] != 'terminated':
+                                if instance['State']['Name'] not in ['terminated', 'terminating']:
                                     instance_ids.append(instance['InstanceId'])
                                     print(f"Terminando instancia: {instance['InstanceId']}")
                                     ec2_client.terminate_instances(InstanceIds=[instance['InstanceId']])
@@ -134,16 +112,32 @@ def cleanup_transit_gateway_infrastructure():
                 except Exception as e:
                     print(f"Error eliminando {vpc_name}: {e}")
         
-        # 3. Eliminar Transit Gateways
-        print("\n--- Eliminando Transit Gateways ---")
-        for region, ec2_client, tgw_id in tgw_ids:
-            try:
-                print(f"Eliminando TGW {tgw_id} en {region}")
-                ec2_client.delete_transit_gateway(TransitGatewayId=tgw_id)
-            except Exception as e:
-                print(f"Error eliminando TGW {tgw_id}: {e}")
+        # 2. Eliminar Transit Gateways (opcional, comentado para mantener TGWs con peering inter-regional)
+        # print("\n--- Eliminando Transit Gateways ---")
+        # # Pausa adicional para asegurar que todos los attachments estén eliminados
+        # time.sleep(60)
         
-        print("\n✅ Limpieza completada!")
+        # for region, ec2_client, tgw_id in tgw_ids:
+        #     try:
+        #         print(f"Eliminando TGW {tgw_id} en {region}")
+        #         ec2_client.delete_transit_gateway(TransitGatewayId=tgw_id)
+                
+        #         # Esperar eliminación del TGW
+        #         print(f"Esperando eliminación de TGW {tgw_id}...")
+        #         while True:
+        #             try:
+        #                 response = ec2_client.describe_transit_gateways(TransitGatewayIds=[tgw_id])
+        #                 state = response['TransitGateways'][0]['State']
+        #                 if state in ['deleted', 'deleting']:
+        #                     break
+        #             except:
+        #                 break  # TGW no existe, eliminado
+        #             time.sleep(30)
+                    
+        #     except Exception as e:
+        #         print(f"Error eliminando TGW {tgw_id}: {e}")
+        
+        print("\n✅ Limpieza de conexiones intra-regionales completada!")
         
     except Exception as e:
         print(f"❌ Error durante la limpieza: {e}")

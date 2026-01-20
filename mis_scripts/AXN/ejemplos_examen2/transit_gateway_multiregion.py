@@ -361,29 +361,61 @@ def configure_tgw_routes(tgw_east_id, tgw_west_id, peering_id):
         print(f"⚠️ Error configurando rutas TGW: {e}")
         print("Continuando sin rutas TGW (las VPCs locales seguirán funcionando)")
 
-def configure_vpc_routes(region, vpc_resources, tgw_id):
+def configure_vpc_routes(region, vpc_resources, tgw_id, vpc_configs):
     """Configura rutas en las VPCs hacia el Transit Gateway"""
     ec2 = boto3.client('ec2', region_name=region)
     
     print(f"\n--- Configurando rutas VPC en {region} ---")
     
-    # Determinar CIDR de destino según la región
-    if region == 'us-east-1':
-        dest_cidr = '192.0.0.0/8'  # Hacia redes de West
-    else:
-        dest_cidr = '10.0.0.0/8'   # Hacia redes de East
+    # Pausa para asegurar que los attachments estén completamente propagados
+    print("Esperando propagación de attachments...")
+    time.sleep(30)
     
-    for resource in vpc_resources:
+    for i, resource in enumerate(vpc_resources):
         rt_id = resource['route_table_id']
+        vpc_name = vpc_configs[i]['name']
+        
+        # Ruta para tráfico cross-region
+        if region == 'us-east-1':
+            cross_region_cidr = '192.0.0.0/8'  # Hacia redes de West
+            # Ruta intra-regional: hacia la otra VPC en East
+            local_cidr = '10.2.0.0/16' if 'East-1' in vpc_name else '10.1.0.0/16'
+        else:
+            cross_region_cidr = '10.0.0.0/8'   # Hacia redes de East  
+            # Ruta intra-regional: hacia la otra VPC en West
+            local_cidr = '192.224.0.0/16' if 'West-1' in vpc_name else '192.168.0.0/16'
+        
+        print(f"Configurando rutas para {vpc_name}...")
+        
+        # Agregar ruta cross-region
         try:
             ec2.create_route(
                 RouteTableId=rt_id,
-                DestinationCidrBlock=dest_cidr,
+                DestinationCidrBlock=cross_region_cidr,
                 TransitGatewayId=tgw_id
             )
-            print(f"Ruta {dest_cidr} -> TGW configurada en RT {rt_id}")
+            print(f"  Ruta {cross_region_cidr} -> TGW configurada")
         except Exception as e:
-            print(f"⚠️ Error configurando ruta en {rt_id}: {e}")
+            if "RouteAlreadyExists" not in str(e):
+                print(f"  ⚠️ Error configurando ruta cross-region: {e}")
+        
+        # Pausa entre configuración de rutas
+        time.sleep(5)
+        
+        # Agregar ruta intra-regional
+        try:
+            ec2.create_route(
+                RouteTableId=rt_id,
+                DestinationCidrBlock=local_cidr,
+                TransitGatewayId=tgw_id
+            )
+            print(f"  Ruta {local_cidr} -> TGW configurada")
+        except Exception as e:
+            if "RouteAlreadyExists" not in str(e):
+                print(f"  ⚠️ Error configurando ruta intra-regional: {e}")
+        
+        # Pausa entre VPCs
+        time.sleep(10)
 
 def main():
     print("=== Iniciando despliegue de infraestructura Transit Gateway ===")
@@ -417,8 +449,8 @@ def main():
         
         # 5. Configurar rutas
         configure_tgw_routes(tgw_east_id, tgw_west_id, peering_id)
-        configure_vpc_routes('us-east-1', east_resources, tgw_east_id)
-        configure_vpc_routes('us-west-2', west_resources, tgw_west_id)
+        configure_vpc_routes('us-east-1', east_resources, tgw_east_id, east_configs)
+        configure_vpc_routes('us-west-2', west_resources, tgw_west_id, west_configs)
         
         print("\n=== RESUMEN DE RECURSOS CREADOS ===")
         print(f"TGW East: {tgw_east_id}")
